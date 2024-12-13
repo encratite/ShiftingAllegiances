@@ -5,10 +5,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
-extern "C" int (*connect_indirect)(SOCKET, const sockaddr *, int);
-extern "C" int (*connect_patch)(SOCKET, const sockaddr *, int);
-extern "C" int (*connect_original)(SOCKET, const sockaddr *, int);
-
 void initialize_console()
 {
 	BOOL result = AllocConsole();
@@ -34,30 +30,52 @@ int connect_patched(SOCKET socket, const sockaddr *name, int name_length)
 		else
 			std::cout << "getnameinfo error (WSAGetLastError " << WSAGetLastError() << ")" << std::endl;
 	}
-	// int connect_result = connect_original(socket, name, name_length);
-	int connect_result = connect_indirect(socket, name, name_length);
+	int connect_result = connect(socket, name, name_length);
 	return connect_result;
 }
 
-void apply_patch()
+IMAGE_SECTION_HEADER *find_section(const char *section_name, HMODULE module)
 {
-	HANDLE process = GetCurrentProcess();
-	LPVOID connect_address = &connect;
-	SIZE_T patch_size = reinterpret_cast<SIZE_T>(&connect_original) - reinterpret_cast<SIZE_T>(&connect_patch);
-	DWORD old_protect;
-	BOOL writable_result = VirtualProtectEx(process, connect_address, patch_size, PAGE_EXECUTE_READWRITE, &old_protect);
-	if (!writable_result)
-		throw new std::exception("Failed to make patch location writable");
-	std::memcpy(&connect, &connect_patch, patch_size);
-	std::cout << "Executed memcpy" << std::endl;
-	void **address_offset = reinterpret_cast<void **>(reinterpret_cast<uint8_t *>(&connect) + 6);
-	*address_offset = &connect_patched;
-	connect_indirect = connect_original;
-	std::cout << "Modified mov rax constant" << std::endl;
-	DWORD new_old_protect;
-	BOOL revert_result = VirtualProtectEx(process, connect_address, patch_size, old_protect, &new_old_protect);
-	if (!revert_result)
-		throw new std::exception("Failed to revert protection");
+	IMAGE_DOS_HEADER *dos_headers = reinterpret_cast<IMAGE_DOS_HEADER *>(module);
+	IMAGE_NT_HEADERS *nt_headers = reinterpret_cast<IMAGE_NT_HEADERS *>(reinterpret_cast<BYTE *>(module) + dos_headers->e_lfanew);
+	IMAGE_SECTION_HEADER *section_header = reinterpret_cast<IMAGE_SECTION_HEADER *>(reinterpret_cast<BYTE *>(&nt_headers->OptionalHeader) + nt_headers->FileHeader.SizeOfOptionalHeader);
+	for (int i = 0; i < nt_headers->FileHeader.NumberOfSections; i++)
+	{
+		if (strncmp((char *)section_header->Name, section_name, IMAGE_SIZEOF_SHORT_NAME) == 0)
+			return section_header;
+		section_header++;
+	}
+	throw std::exception("Unable to find section");
+}
+
+void apply_patch(const char *dll_name)
+{
+	HMODULE module = GetModuleHandleA(dll_name);
+	if (module == 0)
+		throw std::exception("Unable to find DLL");
+	IMAGE_SECTION_HEADER *section_header = find_section(".rdata", module);
+	void **section_data = reinterpret_cast<void **>(reinterpret_cast<BYTE *>(module) + section_header->VirtualAddress);
+	size_t count = section_header->SizeOfRawData / sizeof(void *);
+	for (size_t i = 0; i < count; i++)
+	{
+		void **iat_pointer = section_data + i;
+		if (*iat_pointer == &connect)
+		{
+			HANDLE process = GetCurrentProcess();
+			SIZE_T size = sizeof(void *);
+			DWORD old_protect;
+			BOOL write_result = VirtualProtectEx(process, iat_pointer, size, PAGE_READWRITE, &old_protect);
+			if (!write_result)
+				throw std::exception("Failed to make IAT writable");
+			*iat_pointer = &connect_patched;
+			DWORD unused_protect;
+			BOOL revert_result = VirtualProtectEx(process, iat_pointer, size, old_protect, &unused_protect);
+			if (!revert_result)
+				throw std::exception("Failed to restore IAT protection");
+			return;
+		}
+	}
+	throw new std::exception("Failed to find connect in IAT");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
@@ -69,12 +87,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
 		case DLL_PROCESS_ATTACH:
 			initialize_console();
 			std::cout << "Attached to process" << std::endl;
-			/*
-			std::cout << "Waiting for debugger" << std::endl;
-			while (true)
-				Sleep(100);
-			*/
-			apply_patch();
+			apply_patch("unityplayer.dll");
 			std::cout << "Patched connect" << std::endl;
 			break;
 		case DLL_THREAD_ATTACH:

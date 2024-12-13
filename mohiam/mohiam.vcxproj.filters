@@ -19,9 +19,4 @@
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
-  <ItemGroup>
-    <MASM Include="patch.asm">
-      <Filter>Source Files</Filter>
-    </MASM>
-  </ItemGroup>
 </Project>
