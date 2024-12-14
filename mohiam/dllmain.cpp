@@ -1,4 +1,5 @@
 #include <iostream>
+#include <regex>
 #include <cstdio>
 #include <cstdlib>
 #include <windows.h>
@@ -17,18 +18,39 @@ void initialize_console()
 	std::cin.sync_with_stdio();
 }
 
-int connect_patched(SOCKET socket, const sockaddr *name, int name_length)
+bool host_port_match(char *node, u_short port)
+{
+	std::regex pattern("\\.amazonaws\\.com$");
+	return std::regex_search(node, pattern) && (port == 443 || port >= 39000);
+}
+
+int connect_patched(SOCKET socket, sockaddr *name, int name_length)
 {
 	ADDRESS_FAMILY family = name->sa_family;
 	if (family == AF_INET || family == AF_INET6)
 	{
 		char node[NI_MAXHOST];
 		char service[NI_MAXSERV];
-		int name_result = getnameinfo(name, sizeof(sockaddr_in), node, sizeof(node), service, sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV);
+		socklen_t socket_length = family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
+		int name_result = getnameinfo(name, socket_length, node, sizeof(node), service, sizeof(service), NI_NAMEREQD | NI_NUMERICSERV);
 		if (!name_result)
 			std::cout << "Intercepted connect call to " << node << ":" << service << std::endl;
 		else
 			std::cout << "getnameinfo error (WSAGetLastError " << WSAGetLastError() << ")" << std::endl;
+		if (family == AF_INET)
+		{
+			sockaddr_in *ipv4_name = reinterpret_cast<sockaddr_in *>(name);
+			u_short port = htons(ipv4_name->sin_port);
+			if (host_port_match(node, port))
+				inet_pton(family, "127.0.0.1", &ipv4_name->sin_addr);
+		}
+		else
+		{
+			sockaddr_in6 *ipv6_name = reinterpret_cast<sockaddr_in6 *>(name);
+			u_short port = htons(ipv6_name->sin6_port);
+			if (host_port_match(node, port))
+				inet_pton(family, "::1", &ipv6_name->sin6_addr);
+		}
 	}
 	int connect_result = connect(socket, name, name_length);
 	return connect_result;
@@ -41,7 +63,8 @@ IMAGE_SECTION_HEADER *find_section(const char *section_name, HMODULE module)
 	IMAGE_SECTION_HEADER *section_header = reinterpret_cast<IMAGE_SECTION_HEADER *>(reinterpret_cast<BYTE *>(&nt_headers->OptionalHeader) + nt_headers->FileHeader.SizeOfOptionalHeader);
 	for (int i = 0; i < nt_headers->FileHeader.NumberOfSections; i++)
 	{
-		if (strncmp((char *)section_header->Name, section_name, IMAGE_SIZEOF_SHORT_NAME) == 0)
+		char *name = reinterpret_cast<char *>(section_header->Name);
+		if (strncmp(name, section_name, IMAGE_SIZEOF_SHORT_NAME) == 0)
 			return section_header;
 		section_header++;
 	}
