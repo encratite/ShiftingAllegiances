@@ -34,12 +34,35 @@ bool host_port_match(char *node, u_short port)
 	return std::regex_search(node, pattern) && (port == HTTPS_PORT || port >= PORT_LIMIT);
 }
 
-int initialize_connection(SOCKET socket, const sockaddr *name, int name_length, const char *header_buffer)
+int initialize_connection(SOCKET socket, const sockaddr *name, int name_length, const char *header_buffer, const std::string &address)
 {
-	int connect_result = connect(socket, name, name_length);
-	if (connect_result != SOCKET_ERROR)
-		send(socket, header_buffer, HEADER_SIZE, 0);
-	return connect_result;
+	try
+	{
+		std::cout << "Redirected connect to " << address << std::endl;
+		int connect_result = connect(socket, name, name_length);
+		if (connect_result == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)
+			throw std::exception("connect failed");
+		fd_set write_set;
+		FD_ZERO(&write_set);
+		FD_SET(socket, &write_set);
+		int select_result = select(0, nullptr, &write_set, nullptr, nullptr);
+		if (select_result == SOCKET_ERROR)
+			throw std::exception("Post-connect select failed");
+		int send_result = send(socket, header_buffer, HEADER_SIZE, 0);
+		if (send_result == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)
+			throw std::exception("send failed");
+		FD_ZERO(&write_set);
+		FD_SET(socket, &write_set);
+		select_result = select(0, nullptr, &write_set, nullptr, nullptr);
+		if (select_result == SOCKET_ERROR)
+			throw std::exception("Post-connect select failed");
+		return connect_result;
+	}
+	catch (const std::exception &exception)
+	{
+		std::cout << exception.what() << " (WSAGetLastError " << WSAGetLastError() << ")" << std::endl;
+		return SOCKET_ERROR;
+	}
 }
 
 int connect_patched(SOCKET socket, sockaddr *name, int name_length)
@@ -51,13 +74,14 @@ int connect_patched(SOCKET socket, sockaddr *name, int name_length)
 		char service[NI_MAXSERV];
 		socklen_t socket_length = family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
 		int name_result = getnameinfo(name, socket_length, node, sizeof(node), service, sizeof(service), NI_NAMEREQD | NI_NUMERICSERV);
+		if (name_result)
+		{
+			std::cout << "getnameinfo error (WSAGetLastError " << WSAGetLastError() << ")" << std::endl;
+			return SOCKET_ERROR;
+		}
 		std::stringstream address_stream;
 		address_stream << node << ":" << service;
 		std::string address(address_stream.str());
-		if (!name_result)
-			std::cout << "Intercepted connect call to " << address << std::endl;
-		else
-			std::cout << "getnameinfo error (WSAGetLastError " << WSAGetLastError() << ")" << std::endl;
 		char header_buffer[HEADER_SIZE];
 		std::memset(header_buffer, 0, HEADER_SIZE);
 		std::strncpy(header_buffer, address.c_str(), HEADER_SIZE - 1);
@@ -71,7 +95,7 @@ int connect_patched(SOCKET socket, sockaddr *name, int name_length)
 				std::memcpy(&redirected_name, ipv4_name, sizeof(sockaddr_in));
 				inet_pton(family, "127.0.0.1", &redirected_name.sin_addr);
 				redirected_name.sin_port = htons(LOCAL_PORT);
-				int connect_result = initialize_connection(socket, reinterpret_cast<sockaddr *>(&redirected_name), name_length, header_buffer);
+				int connect_result = initialize_connection(socket, reinterpret_cast<sockaddr *>(&redirected_name), name_length, header_buffer, address);
 				return connect_result;
 			}
 		}
@@ -85,7 +109,7 @@ int connect_patched(SOCKET socket, sockaddr *name, int name_length)
 				std::memcpy(&redirected_name, ipv6_name, sizeof(sockaddr_in6));
 				inet_pton(family, "::1", &redirected_name.sin6_addr);
 				redirected_name.sin6_port = htons(LOCAL_PORT);
-				int connect_result = initialize_connection(socket, reinterpret_cast<sockaddr *>(&redirected_name), name_length, header_buffer);
+				int connect_result = initialize_connection(socket, reinterpret_cast<sockaddr *>(&redirected_name), name_length, header_buffer, address);
 				return connect_result;
 			}
 		}

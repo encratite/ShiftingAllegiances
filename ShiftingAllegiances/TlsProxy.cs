@@ -1,6 +1,5 @@
 ﻿using System;
 using System.IO;
-using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -11,19 +10,19 @@ using System.Threading.Tasks;
 
 namespace ShiftingAllegiances
 {
-	internal class Server
+	internal class TlsProxy
 	{
 		private const int HeaderSize = 256;
 		private const int BufferSize = 2048;
 		private const string LogsDirectory = "Logs";
 
 		private int _port;
-		private string _certificatePath;
+		private string _pfxPath;
 
-		public Server(int port, string certificatePath)
+		public TlsProxy(int port, string pfxPath)
 		{
 			_port = port;
-			_certificatePath = certificatePath;
+			_pfxPath = pfxPath;
 		}
 
 		public void Run()
@@ -33,12 +32,12 @@ namespace ShiftingAllegiances
 				Directory.CreateDirectory(LogsDirectory);
 				Console.WriteLine("Created logging directory");
 			}
-			var serverCertificate = new X509Certificate(_certificatePath, "");
+			var serverCertificate = new X509Certificate(_pfxPath, "");
 			var address = IPAddress.Parse("127.0.0.1");
 			var localEndpoint = new IPEndPoint(address, _port);
 			var listener = new TcpListener(localEndpoint);
 			listener.Start();
-			Console.WriteLine($"Listening for TCP connections on {address}");
+			Console.WriteLine($"Listening for TCP connections on {localEndpoint}");
 			while (true)
 			{
 				var localClient = listener.AcceptTcpClient();
@@ -75,12 +74,12 @@ namespace ShiftingAllegiances
 			}
 			if (bytesToRead > 0)
 				throw new ApplicationException($"Failed to read header ({bytesToRead} bytes left)");
-			int nonZeroByteCount = 0;
+			int nonZeroByteCount = 1;
 			for (int i = 1; i < buffer.Length; i++)
 			{
 				if (buffer[i] == 0)
 					break;
-				nonZeroByteCount = i - 1;
+				nonZeroByteCount++;
 			}
 			string header = Encoding.ASCII.GetString(buffer, 0, nonZeroByteCount);
 			var pattern = new Regex(@"^(?<host>.+?):(?<port>\d+)$");
@@ -98,7 +97,7 @@ namespace ShiftingAllegiances
 			remoteStream.AuthenticateAsClient(host);
 			var localStream = new SslStream(localClient.GetStream(), false);
 			localStream.AuthenticateAsServer(serverCertificate);
-			string timestamp = now.ToString("yyyy-MM-dd HH-mm-ss");
+			string timestamp = GetTimestamp().Replace(":", "-");
 			var ipEndPoint = (IPEndPoint)localClient.Client.RemoteEndPoint;
 			string fileName = $"{timestamp} {ipEndPoint.Port}.log";
 			string logPath = Path.Combine(LogsDirectory, fileName);
@@ -127,10 +126,11 @@ namespace ShiftingAllegiances
 					var remoteWriteBuffer = new byte[bytesRead];
 					Array.Copy(readBuffer, remoteWriteBuffer, bytesRead);
 					var now = DateTime.UtcNow;
-					string timestamp = now.ToString("yyyy-MM-dd HH:mm:ss");
+					string timestamp = GetTimestamp();
 					string prefixString = $"{timestamp} {logPrefix} ({bytesRead} bytes)\n";
 					if (logStream.Length > 0)
 						prefixString = $"\n{prefixString}";
+					Console.WriteLine(prefixString);
 					var prefixBuffer = Encoding.ASCII.GetBytes(prefixString);
 					await logStream.WriteAsync(prefixBuffer, 0, prefixBuffer.Length);
 					await logStream.WriteAsync(remoteWriteBuffer, 0, bytesRead);
@@ -142,7 +142,14 @@ namespace ShiftingAllegiances
 			return readTask;
 		}
 
-		private bool TrustAllCertificates(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors)
+		private static string GetTimestamp()
+		{
+			var now = DateTime.UtcNow;
+			string timestamp = now.ToString("yyyy-MM-dd HH:mm:ss");
+			return timestamp;
+		}
+
+		private static bool TrustAllCertificates(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors)
 		{
 			return true;
 		}

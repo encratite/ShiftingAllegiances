@@ -1,9 +1,5 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace ShiftingAllegiances
 {
@@ -21,6 +17,8 @@ namespace ShiftingAllegiances
 			}
 			int port = int.Parse(arguments[0]);
 			string pfxPath = arguments[1];
+			var tlsProxy = new TlsProxy(port, pfxPath);
+			tlsProxy.Run();
 		}
 	}
 }
